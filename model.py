@@ -1,14 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from modules import Encoder, Decoder  
+from modules import EncoderViT,DecoderViT
 
 
 class VQVAE(nn.Module):
     def __init__(self, latent_dim=1, num_embeddings=512, beta=0.25, use_ema=True, ema_decay=0.99, e_width = 64, d_width = 64):
         super().__init__()
-        self.encoder = Encoder(latent_dim=latent_dim, width= e_width)
-        self.decoder = Decoder(latent_dim=latent_dim, width= d_width)
+        self.encoder = EncoderViT(latent_dim=latent_dim)
+        self.decoder = DecoderViT(latent_dim=latent_dim)
         self.codebook = nn.Embedding(num_embeddings, latent_dim)
         self.register_buffer('ema_cluster_size', torch.zeros(num_embeddings))
         self.register_buffer('ema_w', torch.zeros(num_embeddings, latent_dim))
@@ -24,16 +24,12 @@ class VQVAE(nn.Module):
     def forward(self, img):
         # Encode the image
         z = self.encoder(img)
-        B, C, H, W = z.shape
-
-        # Reshape the latent representation to (batch_size, height*width, latent_dim)
-        z_copy = z.view(z.shape[0], z.shape[1], -1).permute(0, 2, 1)  # Shape: (batch_size, height*width, latent_dim)
         
         # Compute the distances between z and the codebook entries
         codebook_entries = self.codebook.weight  # Shape: (num_embeddings, latent_dim)
         
         # Compute the distances (squared L2 norm)
-        distances = torch.cdist(z_copy, codebook_entries.unsqueeze(0), p=2)  # Shape: (batch_size, height*width, num_embeddings)
+        distances = torch.cdist(z, codebook_entries.unsqueeze(0), p=2)  # Shape: (batch_size, height*width, num_embeddings)
         
         # Find the nearest codebook entry for each vector in z
         min_distances, indices = torch.min(distances, dim=-1)
@@ -43,15 +39,12 @@ class VQVAE(nn.Module):
         
         # Get the corresponding codebook vectors
         z_q = self.codebook(indices)  # Shape: (batch_size, height*width, latent_dim)
-
-        # Reshape z_q back to the spatial dimensions of z
-        z_q = z_q.permute(0, 2, 1).view((B, C, H, W))  # Shape: (batch_size, latent_dim, height, width)
         
         commitment_loss = torch.mean((z_q.detach() - z) ** 2)
         codebook_loss = torch.mean((z_q - z.detach()) ** 2)
         if self.use_ema:
             # EMA update for the codebook
-            self.ema_inplace_update(indices, z_copy)
+            #self.ema_inplace_update(indices, z_copy)
             loss = commitment_loss
         else:
             loss = commitment_loss + codebook_loss * self.beta
@@ -97,13 +90,9 @@ class VQVAE(nn.Module):
                 self.codebook.weight.data[idx] = z[random_index].view(-1).data
             self.usage_count[underused_indices] = threshold  # Reset usage count to prevent immediate re-resetting
     
-    def decode(self,x,height=64, width=64):
-        latent_dim = self.latent_dim
+    def decode(self,x):
         # Get corresponding embeddings from the codebook
         z_q = self.codebook(x)
-
-        # Reshape embeddings to the appropriate shape for the decoder
-        z_q = z_q.permute(0, 2, 1).view(x.size(0), latent_dim, height//4, width//4)
         
         # Generate the output image using the decoder
         output = self.decoder(z_q)
@@ -114,16 +103,12 @@ class VQVAE(nn.Module):
     def return_indices(self, img):
         # Encode the image
         z = self.encoder(img)
-        B, C, H, W = z.shape
 
-        # Reshape the latent representation to (batch_size, height*width, latent_dim)
-        z_copy = z.view(z.shape[0], z.shape[1], -1).permute(0, 2, 1)  # Shape: (batch_size, height*width, latent_dim)
-        
         # Compute the distances between z and the codebook entries
         codebook_entries = self.codebook.weight  # Shape: (num_embeddings, latent_dim)
         
         # Compute the distances (squared L2 norm)
-        distances = torch.cdist(z_copy, codebook_entries.unsqueeze(0), p=2)  # Shape: (batch_size, height*width, num_embeddings)
+        distances = torch.cdist(z, codebook_entries.unsqueeze(0), p=2)  # Shape: (batch_size, height*width, num_embeddings)
         
         # Find the nearest codebook entry for each vector in z
         min_distances, indices = torch.min(distances, dim=-1)
