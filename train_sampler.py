@@ -132,9 +132,9 @@ def training_loop(n_epochs, optimizer, model, clip, vqvae,
     
 
 if __name__ == "__main__":
-    json_file = '/Users/ayanfe/Documents/Code/Scraping Shit/train.json'
-    image_folder = '/Users/ayanfe/Documents/Code/Scraping Shit/images'
-    valid_file = '/Users/ayanfe/Documents/Code/Scraping Shit/val.json'
+    json_file = '/Users/ayanfe/Documents/Datasets/Waifus/train.json'
+    image_folder = '/Users/ayanfe/Documents/Datasets/Waifus/Train'
+    valid_file = '/Users/ayanfe/Documents/Datasets/Waifus/val.json'
     clip_model_path = 'weights/cnn-clip-mask_false.pth'
     vq_model_path = 'weights/waifu-vqvae_epoch.pth'
     model_path = 'weights/vqvae-transformer.pth'
