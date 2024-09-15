@@ -124,8 +124,8 @@ if __name__ == "__main__":
     loss_fn = nn.MSELoss().to(device)
 
     print(count_parameters(model))
-    data_loader = get_data_loader(path, batch_size = 32, num_samples=40_000)
-    val_loader = get_data_loader(val_path, batch_size = 32, num_samples=10_000)
+    data_loader = get_data_loader(path, batch_size = 4, num_samples=90_000)
+    val_loader = get_data_loader(val_path, batch_size = 4, num_samples=10_000)
 
     
     # Optionally load model weights if needed
