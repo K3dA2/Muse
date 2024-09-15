@@ -1,141 +1,118 @@
-import math
 import torch
 import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 import unittest
+from einops.layers.torch import Rearrange
 
-class ResNet(nn.Module):
-    def __init__(self, in_channels = 3 ,out_channels = 32):
+class Transformer(nn.Module):
+    def __init__(self, emb_dim, n_heads=8):
         super().__init__()
-        num_groups = 4
-        if in_channels < 4:
-            num_groups = in_channels
-        self.num_channels = out_channels
-        self.in_channels = in_channels
-        self.network = nn.Sequential(
-            nn.GroupNorm(num_groups,in_channels),
-            nn.SiLU(),
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.GroupNorm(num_groups,out_channels),
-            nn.SiLU(),
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        )
-        if in_channels == out_channels:
-            self.residual_layer = nn.Identity()
-        else:
-            self.residual_layer = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=0)
-
-    def forward(self, x):
-        out = self.network(x)
-        return torch.add(out,self.residual_layer(x))
-
-class SelfAttention(nn.Module):
-    def __init__(self, channels):
-        super(SelfAttention, self).__init__()
-        self.channels = channels
-        self.mha = nn.MultiheadAttention(channels, 8, batch_first=True)
-        self.ln = nn.LayerNorm([channels])
-        self.ff_self = nn.Sequential(
-            nn.LayerNorm([channels]),
-            nn.Linear(channels, channels),
+        self.ln1 = nn.LayerNorm(emb_dim)
+        self.mha1 = nn.MultiheadAttention(emb_dim, n_heads, batch_first=True)
+        self.ln2 = nn.LayerNorm(emb_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(emb_dim, emb_dim * 10),
             nn.GELU(),
-            nn.Linear(channels, channels),
-        )
-        self.dropout = nn.Dropout(0.2)
+            nn.Linear(emb_dim * 10, emb_dim)
+        )       
 
     def forward(self, x):
-        x_size = x.shape[-1]
-        batch_size = x.shape[0]
-        # Using reshape instead of view
-        x = x.reshape(batch_size, self.channels, -1).swapaxes(1, 2)
-       
-        x_ln = self.ln(x)
-        attention_value, _ = self.mha(x_ln, x_ln, x_ln)
-        attention_value = attention_value + x
-        attention_value = self.dropout(attention_value)
-        attention_value = self.ff_self(attention_value) + attention_value
-        return attention_value.swapaxes(2, 1).reshape(batch_size, self.channels, x_size, x_size)    
+        x_norm = self.ln1(x)
+        attn_output, _ = self.mha1(x_norm, x_norm, x_norm)
+        x = x + attn_output
 
-class Encoder(nn.Module):
-    def __init__(self, latent_dim = 32, width = 64) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(3, width, kernel_size=3, padding=1),
-            nn.ReLU(),
-            ResNet(width,width),
-            ResNet(width, width * 2),
-            nn.MaxPool2d(2),
-            nn.Conv2d(width * 2, width * 2, kernel_size=3, padding=1),  #Half Size
-            ResNet(width * 2, width * 4),
-            ResNet(width * 4, width * 4),
-            nn.MaxPool2d(2),
-            nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1),  #Half Size
-            ResNet(width * 4, width * 4),
-            ResNet(width * 4, width * 4),
-            nn.MaxPool2d(2),
-            nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1),  #Half Size
-            ResNet(width * 4, width * 4),
-            SelfAttention(width * 4),
-            ResNet(width * 4, width * 4),
-            ResNet(width * 4, width),
-            nn.GroupNorm(8, width),
-            nn.SiLU(),
-            nn.Conv2d(width, latent_dim, kernel_size=3, padding=1)
+        x_norm = self.ln2(x)
+        ff_output = self.ff(x_norm)
+        x = x + ff_output
+        return x
+
+class EncoderViT(nn.Module):
+    def __init__(self, in_channels=3, p=8, dim=128, depth=8, latent_dim = 64):
+        super(EncoderViT, self).__init__()
+        patch_dim = in_channels * p * p
+        self.num_patches = (128 // p) * (128 // p)
+        self.to_patch_embedding = nn.Sequential(
+            Rearrange('b c (h p1) (w p2) -> b (h w) (p1 p2 c)', p1=p, p2=p),
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim),
+            nn.LayerNorm(dim),
         )
-    
-    def forward(self,img):
-        out = self.net(img)
-        #print(out.shape)
-        return out
+        self.att = nn.ModuleList([Transformer(dim) for _ in range(depth)])
+        self.pos_emb = nn.Embedding(self.num_patches, dim)
+        self.proj = nn.Linear(dim, latent_dim)
 
-class Decoder(nn.Module):
-    def __init__(self, latent_dim = 32, width = 64) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(latent_dim, width, kernel_size=3, padding=1),
-            ResNet(width, width * 4),
-            ResNet(width * 4, width * 4),
-            SelfAttention(width * 4),
-            ResNet(width * 4, width * 4),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1),
-            ResNet(width * 4, width * 4),
-            ResNet(width * 4, width * 4),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1),
-            ResNet(width * 4, width * 4),
-            ResNet(width * 4, width * 4),
-            nn.Upsample(scale_factor=2),
-            nn.Conv2d(width * 4, width * 4, kernel_size=3, padding=1),
-            ResNet(width * 4, width * 2),
-            ResNet(width * 2, width * 2),
-            nn.Conv2d(width * 2, width, kernel_size=3, padding=1),
-            nn.GroupNorm(8, width),
-            nn.SiLU(),
-            nn.Conv2d(width, 3, kernel_size=3, padding=1),
+    def forward(self, x):
+        x = self.to_patch_embedding(x)
+        pos = torch.arange(0, self.num_patches, dtype=torch.long, device=x.device)
+        pos = self.pos_emb(pos)
+        x += pos
+
+        for layer in self.att:
+            x = layer(x)
+
+        x = self.proj(x)
+        return x
+
+class DecoderViT(nn.Module):
+    def __init__(self, in_channels=3, p=8, dim=128, depth=8, latent_dim = 64):
+        super(DecoderViT, self).__init__()
+        patch_dim = in_channels * p * p
+        self.num_patches = (128 // p) * (128 // p)
+        self.to_image = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, patch_dim),
+            nn.GELU(),
+            nn.Linear(patch_dim, patch_dim),
+            nn.LayerNorm(patch_dim),
+            Rearrange('b (h w) (p1 p2 c) -> b c (h p1) (w p2)', h = 16, w = 16,p1=p, p2=p, c=in_channels),
         )
-    
-    def forward(self,img):
-        out = self.net(img)
-        #print(out.shape)
-        return out
-    
-class TestDecoder(unittest.TestCase):
-    def test_decoder_output_shape(self):
-        # Create a dummy input image with latent representation size
-        img = torch.randn(2, 32, 16, 16)
-        
-        # Initialize the decoder
-        decoder = Decoder(latent_dim=32)
-        
-        # Pass the image through the decoder
-        out = decoder(img)
-        
-        print(out.shape)
-        # Check the output shape
-        self.assertEqual(out.shape, (2, 3, 64, 64), f"Output shape mismatch: expected (2, 32, 32, 32), got {out.shape}")
+        self.att = nn.ModuleList([Transformer(dim) for _ in range(depth)])
+        self.pos_emb = nn.Embedding(self.num_patches, dim)
+        self.proj = nn.Linear(latent_dim,dim)
+
+    def forward(self, x):
+        x = self.proj(x)
+        pos = torch.arange(0, self.num_patches, dtype=torch.long, device=x.device)
+        pos = self.pos_emb(pos)
+        x += pos
+
+        for layer in self.att:
+            x = layer(x)
+
+        x = self.to_image(x)
+        return x
 
 
-if __name__ == '__main__':
+class TestViTModel(unittest.TestCase):
+
+    def setUp(self):
+        self.encoder = EncoderViT(in_channels=3, p=8, dim=128, depth=8)
+        self.decoder = DecoderViT(in_channels=3, p=8, dim=128, depth=8)
+
+    def test_encoder_forward(self):
+        batch_size = 2
+        channels = 3
+        height = width = 128
+        input_data = torch.randn(batch_size, channels, height, width)
+        output = self.encoder(input_data)
+        expected_output_shape = (batch_size, 256, 64)
+        self.assertEqual(output.shape, expected_output_shape)
+
+    def test_decoder_forward(self):
+        batch_size = 2
+        channels = 3
+        height = width = 128
+        input_data = torch.randn(batch_size, 256, 64)
+        output = self.decoder(input_data)
+        expected_output_shape = (batch_size, height, width, channels)
+        self.assertEqual(output.shape, expected_output_shape)
+
+    def test_number_of_parameters(self):
+        encoder_param_count = sum(p.numel() for p in self.encoder.parameters())
+        decoder_param_count = sum(p.numel() for p in self.decoder.parameters())
+        print(f"Number of parameters in the encoder: {encoder_param_count}")
+        print(f"Number of parameters in the decoder: {decoder_param_count}")
+
+if __name__ == "__main__":
     unittest.main()
